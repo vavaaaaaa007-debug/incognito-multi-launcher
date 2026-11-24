@@ -1,0 +1,83 @@
+# 自动打包：
+#   - 每次推送代码 / 手动点「Run workflow」：打包 Mac 版和 Windows 版，在本次运行页面底部的 Artifacts 里下载
+#   - 推送 v 开头的标签（例如 v1.0.1）：另外创建 GitHub Release，并把安装包附在上面
+# 第三方 Action 都固定到具体提交（commit SHA），防止标签被人改动后执行别的代码。
+name: 打包
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    name: Mac 版（dmg）
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 打包
+        run: bash mac/build.sh
+      - name: 检查是通用版、最低 macOS 13
+        run: |
+          B="dist/一键多开无痕浏览器.app/Contents/MacOS/WuhenDuokai"
+          lipo -archs "$B"
+          for a in arm64 x86_64; do vtool -arch $a -show-build "$B" | grep -q 'minos 13.0'; done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mac
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows 版（安装包 + 免安装版）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: win/go.mod
+          cache-dependency-path: win/go.sum
+      - name: 安装 NSIS 和 windres（把图标编进 exe）
+        run: sudo apt-get update -q && sudo apt-get install -y -q nsis binutils-mingw-w64-x86-64
+      - name: 代码检查
+        working-directory: win
+        run: GOOS=windows GOARCH=amd64 go vet .
+      - name: 打包
+        run: bash win/build.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: 发布 Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 检查标签和 VERSION 文件一致
+        run: |
+          want="v$(tr -d ' \n' < VERSION)"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "标签是 $GITHUB_REF_NAME，但 VERSION 文件写的是 $want。请先改 VERSION 再打标签。"; exit 1
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 创建 Release 并上传安装包
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --title "一键多开无痕浏览器 $TAG" --generate-notes
