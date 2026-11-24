@@ -20,6 +20,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # 打包不需要推送权限，不把令牌留在工作目录里
       - name: 打包
         run: bash mac/build.sh
       - name: 检查是通用版、最低 macOS 13
@@ -36,14 +38,27 @@ jobs:
   windows:
     name: Windows 版（安装包 + 免安装版）
     runs-on: ubuntu-latest
+    # 在 Debian 13 (trixie) 官方镜像里打包：它自带 NSIS 3.11，修复了 CVE-2025-43715（Ubuntu 24.04 只有 3.09）。
+    # 镜像固定到具体摘要，防止 tag 被替换；以后要更新，到 Docker Hub 取 debian:trixie 新的摘要替换即可。
+    container:
+      image: debian:trixie@sha256:3cda3ca472ce45507a5109c6a3907093e24d9ae67d55954c9a07a45665dafba2
     steps:
+      - name: 安装 NSIS、windres（把图标编进 exe）和打包要用的工具
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends ca-certificates git python3 nsis binutils-mingw-w64-x86-64
+      - name: 确认 NSIS 不低于 3.11
+        run: |
+          v="$(makensis -VERSION | sed 's/^v//')"
+          echo "NSIS $v"
+          [ "$(printf '%s\n%s\n' 3.11 "$v" | sort -V | head -n 1)" = 3.11 ] || { echo "NSIS 版本低于 3.11，停止打包"; exit 1; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # 打包不需要推送权限，不把令牌留在工作目录里
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: win/go.mod
           cache-dependency-path: win/go.sum
-      - name: 安装 NSIS 和 windres（把图标编进 exe）
-        run: sudo apt-get update -q && sudo apt-get install -y -q nsis binutils-mingw-w64-x86-64
       - name: 代码检查
         working-directory: win
         run: GOOS=windows GOARCH=amd64 go vet .
@@ -66,6 +81,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # 打包不需要推送权限，不把令牌留在工作目录里
       - name: 检查标签和 VERSION 文件一致
         run: |
           want="v$(tr -d ' \n' < VERSION)"
@@ -76,6 +93,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: 生成校验文件 SHA256SUMS.txt（下载的人可以核对文件是否完整、未被改动）
+        working-directory: dist
+        run: |
+          sha256sum -- *.dmg *.exe *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
       - name: 创建 Release 并上传安装包
         env:
           GH_TOKEN: ${{ github.token }}
