@@ -51,7 +51,7 @@ bash mac/build.sh
 **Windows 版**（在 Mac 或 Linux 上交叉编译，不需要 Windows 电脑）：
 
 ```bash
-brew install go makensis
+brew install go makensis mingw-w64
 ```
 ```bash
 bash win/build.sh
@@ -63,6 +63,11 @@ bash win/build.sh
 
 ```
 VERSION                    版本号（打包脚本和发布流程都读这里）
+assets/icon.svg            图标设计稿；改了之后运行 assets/make_icons.sh 重新生成下面两个图标
+mac/AppIcon.icns           Mac 图标（macOS 13–15）
+mac/Assets.car             Mac 图标（macOS 26 起的新格式）
+win/app.ico                Windows 图标
+win/app.rc                 编进 exe 的资源（图标 + 系统清单）
 mac/main.swift             Mac 版源码（SwiftUI，单文件）
 mac/build.sh               Mac 打包脚本 → .app + .dmg
 win/main.go                Windows 版源码（Go + lxn/walk）

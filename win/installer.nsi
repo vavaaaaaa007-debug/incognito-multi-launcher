@@ -25,6 +25,8 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 
 !define MUI_ABORTWARNING
+!define MUI_ICON "app.ico"
+!define MUI_UNICON "app.ico"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE}"
@@ -37,7 +39,6 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 Section "Install"
   SetOutPath "$INSTDIR"
   File "${EXE}"
-  File "${EXE}.manifest"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   CreateShortcut "$DESKTOP\${NAME}.lnk" "$INSTDIR\${EXE}"
   CreateDirectory "$SMPROGRAMS\${NAME}"
@@ -54,7 +55,6 @@ SectionEnd
 
 Section "Uninstall"
   Delete "$INSTDIR\${EXE}"
-  Delete "$INSTDIR\${EXE}.manifest"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$DESKTOP\${NAME}.lnk"

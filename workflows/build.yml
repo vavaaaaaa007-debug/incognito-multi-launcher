@@ -42,8 +42,8 @@ jobs:
         with:
           go-version-file: win/go.mod
           cache-dependency-path: win/go.sum
-      - name: 安装 NSIS
-        run: sudo apt-get update -q && sudo apt-get install -y -q nsis
+      - name: 安装 NSIS 和 windres（把图标编进 exe）
+        run: sudo apt-get update -q && sudo apt-get install -y -q nsis binutils-mingw-w64-x86-64
       - name: 代码检查
         working-directory: win
         run: GOOS=windows GOARCH=amd64 go vet .

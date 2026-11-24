@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# 由 assets/icon.svg 生成 Mac 图标 mac/AppIcon.icns 和 Windows 图标 win/app.ico。
-# 只在改了图标设计时才需要运行（需要 macOS）；生成的两个文件已经提交在仓库里，打包时直接用。
+# 由 assets/icon.svg 生成：
+#   mac/AppIcon.icns  旧版 macOS（13–15）用的图标
+#   mac/Assets.car    新版 macOS（26 起）用的图标；没有它，系统会把图标放进一个白框里
+#   win/app.ico       Windows 图标
+# 只在改了图标设计时才需要运行（需要 macOS + Xcode）；生成的文件已经放在仓库里，打包时直接用。
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
@@ -18,6 +21,22 @@ for s in 16 32 128 256 512; do
   sips -z $((s*2)) $((s*2)) "$PNG" --out "$SET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$SET" -o "$ROOT/mac/AppIcon.icns"
+
+# 新版 macOS：Icon Composer 格式（.icon），图层是满版（无留白、无圆角）的图，圆角和玻璃效果由系统加。
+# 用 actool 编译成 Assets.car。
+sed -e 's/viewBox="0 0 1024 1024"/viewBox="100 100 824 824"/' -e 's/rx="185"/rx="0"/' icon.svg > "$T/full.svg"
+qlmanage -t -s 1024 -o "$T" "$T/full.svg" >/dev/null 2>&1
+mkdir -p "$T/AppIcon.icon/Assets" "$T/car"
+cp "$T/full.svg.png" "$T/AppIcon.icon/Assets/fg.png"
+cat > "$T/AppIcon.icon/icon.json" <<'JSON'
+{
+  "groups" : [ { "layers" : [ { "image-name" : "fg.png", "name" : "fg" } ] } ],
+  "supported-platforms" : { "squares" : [ "macOS" ] }
+}
+JSON
+xcrun actool "$T/AppIcon.icon" --compile "$T/car" --platform macosx --minimum-deployment-target 13.0 \
+  --app-icon AppIcon --output-partial-info-plist "$T/car/partial.plist" >/dev/null
+cp "$T/car/Assets.car" "$ROOT/mac/Assets.car"
 
 # Windows：去掉大部分留白，图标填满格子（Windows 图标的习惯）
 sips --cropToHeightWidth 848 848 "$PNG" --out "$T/win.png" >/dev/null
@@ -37,4 +56,5 @@ for s, img in zip(sizes, imgs):
 pathlib.Path(out).write_bytes(head + dirs + data)
 EOF
 echo "✅ $ROOT/mac/AppIcon.icns"
+echo "✅ $ROOT/mac/Assets.car"
 echo "✅ $ROOT/win/app.ico"

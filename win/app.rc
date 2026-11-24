@@ -1,0 +1,4 @@
+// 编进 exe 的资源：程序图标 + 系统清单（高分屏、新版控件样式）
+// 由 win/build.sh 用 windres 编译成 rsrc_windows_amd64.syso，go build 会自动带上
+1 ICON "app.ico"
+1 24 "app.manifest"

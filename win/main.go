@@ -510,6 +510,10 @@ func main() {
 	if len(browsers) == 0 {
 		lblStatus.SetText("没有找到已安装的 Chrome / Edge / Brave / Firefox")
 	}
+	// 窗口左上角和任务栏用 exe 里编进去的图标（app.rc 里的 1 号图标）
+	if ic, err := walk.NewIconFromResourceId(1); err == nil {
+		mw.SetIcon(ic)
+	}
 	mw.Closing().Attach(func(_ *bool, _ walk.CloseReason) {
 		saveSettings(current())
 	})

@@ -21,6 +21,8 @@ for ARCH in arm64 x86_64; do
   swiftc -O -parse-as-library -target "$ARCH-apple-macos$MIN_MACOS" main.swift -o "$TMPB/$ARCH"
 done
 lipo -create "$TMPB/arm64" "$TMPB/x86_64" -output "$APP/Contents/MacOS/WuhenDuokai"
+# 图标：Assets.car 给新版 macOS（26 起），AppIcon.icns 给旧版；都由 assets/make_icons.sh 生成
+cp AppIcon.icns Assets.car "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -30,6 +32,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>$NAME</string>
   <key>CFBundleIdentifier</key><string>local.wuhen.duokai</string>
   <key>CFBundleExecutable</key><string>WuhenDuokai</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
