@@ -42,6 +42,10 @@ jobs:
     # 镜像固定到具体摘要，防止 tag 被替换；以后要更新，到 Docker Hub 取 debian:trixie 新的摘要替换即可。
     container:
       image: debian:trixie@sha256:3cda3ca472ce45507a5109c6a3907093e24d9ae67d55954c9a07a45665dafba2
+    env:
+      # 容器里代码目录的所有者和运行用户不同，git 出于安全拒绝读取（exit status 128），
+      # Go 默认要读 git 信息写进 exe，于是失败。版本号来自 VERSION 文件，不需要 git 信息，关掉即可。
+      GOFLAGS: -buildvcs=false
     steps:
       - name: 安装 NSIS、windres（把图标编进 exe）和打包要用的工具
         run: |
