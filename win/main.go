@@ -154,15 +154,45 @@ type Manager struct {
 	mu        sync.Mutex
 	instances []*Instance
 	counter   int
-	base      string
+	root      string // 所有运行共用的上层目录
+	base      string // 这次运行自己的 run-<进程号> 子目录：同时开两份软件也互不影响
 	onChange  func()
 }
 
 func newManager() *Manager {
-	base := filepath.Join(os.TempDir(), "WuhenDuokai")
-	os.RemoveAll(base) // 清理上次异常退出的残留
+	root := filepath.Join(os.TempDir(), "WuhenDuokai")
+	base := filepath.Join(root, fmt.Sprintf("run-%d", os.Getpid()))
+	// 只清理已经退出的那些运行留下的目录（异常退出、强制结束）；还在运行的另一份软件的目录不碰。
+	// 旧版本直接放在上层目录里的浏览器目录也一并清掉。
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			var pid int
+			if n, _ := fmt.Sscanf(e.Name(), "run-%d", &pid); n == 1 && processAlive(pid) {
+				continue
+			}
+			os.RemoveAll(filepath.Join(root, e.Name()))
+		}
+	}
 	os.MkdirAll(base, 0o700)
-	return &Manager{base: base}
+	return &Manager{root: root, base: base}
+}
+
+// 进程是否还在：打不开说明不存在（参数无效）；打开了再看退出码是不是 STILL_ACTIVE
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	const processQueryLimitedInformation = 0x1000
+	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
+	if err != nil {
+		return err != syscall.Errno(87) // ERROR_INVALID_PARAMETER = 没有这个进程；其他错误（如拒绝访问）说明进程存在
+	}
+	defer syscall.CloseHandle(h)
+	var code uint32
+	if syscall.GetExitCodeProcess(h, &code) != nil {
+		return true
+	}
+	return code == 259 // STILL_ACTIVE
 }
 
 func (m *Manager) list() []*Instance {
@@ -182,6 +212,8 @@ user_pref("browser.sessionstore.resume_from_crash", false);
 `
 
 func (m *Manager) Launch(b *Browser, count int, urls []string, zoom int) error {
+	// 缩放比例来自本机保存的设置，限制在 25%–500%：0 或负数会让 log() 得出无效值，浏览器配置写坏
+	zoom = min(max(zoom, 25), 500)
 	alive := len(m.list())
 	for i := 0; i < count; i++ {
 		m.mu.Lock()
@@ -306,7 +338,8 @@ func (m *Manager) Shutdown() {
 		}
 	}
 	time.Sleep(500 * time.Millisecond)
-	os.RemoveAll(m.base)
+	os.RemoveAll(m.base) // 只删自己这次运行的目录
+	os.Remove(m.root)    // 上层目录空了才会删掉；别的运行还在就保留
 }
 
 // 只接受 http/https 网址：以 "-" 开头的行会被浏览器当成启动参数（例如能运行程序的开关）。
@@ -355,9 +388,16 @@ func saveSettings(s Settings) {
 	os.WriteFile(settingsPath(), b, 0o600)
 }
 
-// ---------- 界面 ----------
+// ---------- 界面（薄荷绿主题） ----------
 
 var zoomChoices = []int{25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150}
+
+var (
+	colWindow = walk.RGB(0xF3, 0xFA, 0xF7) // 窗口背景：极浅薄荷
+	colCard   = walk.RGB(0xFF, 0xFF, 0xFF) // 卡片：白
+	colDeep   = walk.RGB(0x0B, 0x7A, 0x5A) // 深薄荷：标题、提示文字
+	colMuted  = walk.RGB(0x6B, 0x7B, 0x75) // 次要文字
+)
 
 func main() {
 	mgr := newManager()
@@ -367,12 +407,13 @@ func main() {
 	var (
 		mw        *walk.MainWindow
 		cbBrowser *walk.ComboBox
-		neCount   *walk.NumberEdit
+		cbCount   *walk.ComboBox
 		cbZoom    *walk.ComboBox
 		teURLs    *walk.TextEdit
 		lbRunning *walk.ListBox
 		lblStatus *walk.Label
 		lblCount  *walk.Label
+		btnLaunch *walk.PushButton
 	)
 
 	names := []string{}
@@ -383,10 +424,23 @@ func main() {
 			browserIdx = i
 		}
 	}
+	countNames := []string{}
+	for n := 1; n <= 36; n++ {
+		if n == 9 {
+			countNames = append(countNames, "9 个（九宫格）")
+		} else {
+			countNames = append(countNames, fmt.Sprintf("%d 个", n))
+		}
+	}
+	countIdx := min(max(st.Count, 1), 36) - 1
 	zoomNames := []string{}
 	zoomIdx := 2
 	for i, z := range zoomChoices {
-		zoomNames = append(zoomNames, fmt.Sprintf("%d%%", z))
+		if z == 100 {
+			zoomNames = append(zoomNames, "100%（原始大小）")
+		} else {
+			zoomNames = append(zoomNames, fmt.Sprintf("%d%%", z))
+		}
 		if z == st.Zoom {
 			zoomIdx = i
 		}
@@ -397,10 +451,10 @@ func main() {
 		shown = mgr.list()
 		items := make([]string, len(shown))
 		for i, inst := range shown {
-			items[i] = inst.Label()
+			items[i] = fmt.Sprintf("  #%d   %s   ·  无痕 · 独立配置", inst.Num, inst.Browser.Name)
 		}
 		lbRunning.SetModel(items)
-		lblCount.SetText(fmt.Sprintf("运行中（%d）", len(shown)))
+		lblCount.SetText(fmt.Sprintf("运行中的窗口（%d）", len(shown)))
 	}
 	mgr.onChange = func() {
 		if mw != nil {
@@ -408,7 +462,7 @@ func main() {
 		}
 	}
 	current := func() Settings {
-		s := Settings{Count: int(neCount.Value()), URLs: teURLs.Text(), Zoom: 50}
+		s := Settings{Count: cbCount.CurrentIndex() + 1, URLs: teURLs.Text(), Zoom: 50}
 		if i := cbBrowser.CurrentIndex(); i >= 0 && i < len(browsers) {
 			s.Browser = browsers[i].Name
 		}
@@ -417,88 +471,139 @@ func main() {
 		}
 		return s
 	}
+	launchText := func() string { return fmt.Sprintf("一键打开 %d 个无痕窗口", cbCount.CurrentIndex()+1) }
 	selected := func() *Instance {
 		if i := lbRunning.CurrentIndex(); i >= 0 && i < len(shown) {
 			return shown[i]
 		}
 		return nil
 	}
+	fieldLabel := func(t string) Label { return Label{Text: t, TextColor: colMuted} }
 
 	err := MainWindow{
-		AssignTo: &mw,
-		Title:    "一键多开无痕浏览器",
-		MinSize:  Size{Width: 640, Height: 600},
-		Size:     Size{Width: 700, Height: 680},
-		Layout:   VBox{Margins: Margins{Left: 16, Top: 12, Right: 16, Bottom: 12}},
+		AssignTo:   &mw,
+		Title:      "一键多开无痕浏览器",
+		MinSize:    Size{Width: 640, Height: 600},
+		Size:       Size{Width: 720, Height: 680},
+		Background: SolidColorBrush{Color: colWindow},
+		Layout:     VBox{Margins: Margins{Left: 18, Top: 14, Right: 18, Bottom: 14}, Spacing: 10},
 		Children: []Widget{
-			Label{Text: "一键多开无痕浏览器", Font: Font{PointSize: 15, Bold: true}},
-			Label{Text: "每个窗口独立配置 + 无痕模式，账号互不串号；关闭即清除全部数据。", TextColor: walk.RGB(110, 110, 110)},
+			// 顶部：名称 + 说明
+			Label{Text: "一键多开无痕浏览器", Font: Font{PointSize: 16, Bold: true}, TextColor: colDeep},
+			Label{Text: "每个窗口独立配置 + 无痕模式，账号互不串号，关闭即清除数据", TextColor: colMuted},
+
+			// 设置卡片：一行三个下拉框 + 网址
 			Composite{
-				Layout: Grid{Columns: 2, MarginsZero: true},
+				Background: SolidColorBrush{Color: colCard},
+				Layout:     VBox{Margins: Margins{Left: 14, Top: 12, Right: 14, Bottom: 12}, Spacing: 8},
 				Children: []Widget{
-					Label{Text: "浏览器"},
-					ComboBox{AssignTo: &cbBrowser, Model: names, CurrentIndex: browserIdx},
-					Label{Text: "数量"},
-					NumberEdit{AssignTo: &neCount, MinValue: 1, MaxValue: 36, Decimals: 0, Value: float64(st.Count), SpinButtonsVisible: true},
-					Label{Text: "默认缩放"},
-					ComboBox{AssignTo: &cbZoom, Model: zoomNames, CurrentIndex: zoomIdx},
-					Label{Text: "打开网址\n（每行一个）"},
-					TextEdit{AssignTo: &teURLs, Text: st.URLs, VScroll: true, MinSize: Size{Height: 64}},
+					Composite{
+						Layout: Grid{Columns: 3, MarginsZero: true, Spacing: 12},
+						Children: []Widget{
+							fieldLabel("浏览器"), fieldLabel("窗口数量"), fieldLabel("默认缩放"),
+							ComboBox{AssignTo: &cbBrowser, Model: names, CurrentIndex: browserIdx,
+								ToolTipText: "只列出这台电脑上已安装的浏览器"},
+							ComboBox{AssignTo: &cbCount, Model: countNames, CurrentIndex: countIdx,
+								ToolTipText: "1–36 个；超过 9 个时，下一组会稍微错开叠放",
+								OnCurrentIndexChanged: func() {
+									if btnLaunch != nil {
+										btnLaunch.SetText(launchText())
+									}
+								}},
+							ComboBox{AssignTo: &cbZoom, Model: zoomNames, CurrentIndex: zoomIdx,
+								ToolTipText: "网页内容的显示比例"},
+						},
+					},
+					fieldLabel("打开网址（每行一个，每个窗口各开一个标签页；只接受 http/https 网址）"),
+					TextEdit{AssignTo: &teURLs, Text: st.URLs, VScroll: true, MinSize: Size{Height: 60}},
+					Composite{
+						Layout: HBox{MarginsZero: true},
+						Children: []Widget{
+							HSpacer{},
+							LinkLabel{Text: `<a id="reset">恢复默认网址</a>`,
+								OnLinkActivated: func(*walk.LinkLabelLink) { teURLs.SetText(defaultURLs) }},
+						},
+					},
 				},
 			},
-			Composite{
-				Layout: HBox{MarginsZero: true},
-				Children: []Widget{
-					PushButton{Text: "一键打开", MinSize: Size{Width: 200}, OnClicked: func() {
-						if len(browsers) == 0 {
-							walk.MsgBox(mw, "提示", "没有找到 Chrome / Edge / Brave / Firefox", walk.MsgBoxIconWarning)
-							return
-						}
-						s := current()
-						saveSettings(s)
-						var urls []string
-						skipped := 0
-						for _, line := range strings.Split(s.URLs, "\n") {
-							if u := strings.TrimSpace(line); u != "" {
-								if safe, ok := safeURL(u); ok {
-									urls = append(urls, safe)
-								} else {
-									skipped++
-								}
+
+			// 主按钮
+			PushButton{AssignTo: &btnLaunch, Text: fmt.Sprintf("一键打开 %d 个无痕窗口", countIdx+1),
+				MinSize: Size{Height: 42}, Font: Font{PointSize: 11, Bold: true},
+				OnClicked: func() {
+					if len(browsers) == 0 {
+						walk.MsgBox(mw, "提示", "没有找到 Chrome / Edge / Brave / Firefox", walk.MsgBoxIconWarning)
+						return
+					}
+					s := current()
+					saveSettings(s)
+					var urls []string
+					skipped := 0
+					for _, line := range strings.Split(s.URLs, "\n") {
+						if u := strings.TrimSpace(line); u != "" {
+							if safe, ok := safeURL(u); ok {
+								urls = append(urls, safe)
+							} else {
+								skipped++
 							}
 						}
-						if skipped > 0 {
-							defer lblStatus.SetText(lblStatus.Text() + fmt.Sprintf("（跳过 %d 行不是 http/https 网址的内容）", skipped))
-						}
-						b := browsers[cbBrowser.CurrentIndex()]
-						if err := mgr.Launch(b, s.Count, urls, s.Zoom); err != nil {
-							lblStatus.SetText("启动失败：" + err.Error())
-							return
-						}
-						lblStatus.SetText(fmt.Sprintf("已打开 %d 个 %s 无痕窗口", s.Count, b.Name))
+					}
+					if skipped > 0 {
+						defer lblStatus.SetText(lblStatus.Text() + fmt.Sprintf("（跳过 %d 行不是 http/https 网址的内容）", skipped))
+					}
+					b := browsers[cbBrowser.CurrentIndex()]
+					if err := mgr.Launch(b, s.Count, urls, s.Zoom); err != nil {
+						lblStatus.SetTextColor(walk.RGB(0xD9, 0x3A, 0x3F))
+						lblStatus.SetText("✕ 启动失败：" + err.Error())
+						return
+					}
+					lblStatus.SetTextColor(colDeep)
+					lblStatus.SetText(fmt.Sprintf("✓ 已打开 %d 个 %s 无痕窗口", s.Count, b.Name))
+				}},
+
+			// 次要操作 + 结果提示
+			Composite{
+				Layout: HBox{MarginsZero: true, Spacing: 8},
+				Children: []Widget{
+					PushButton{Text: "九宫格重新排列", OnClicked: func() {
+						mgr.Retile()
+						lblStatus.SetTextColor(colDeep)
+						lblStatus.SetText("✓ 已按九宫格重新排列")
 					}},
-					PushButton{Text: "九宫格排列", OnClicked: func() { mgr.Retile(); lblStatus.SetText("已按九宫格重新排列") }},
-					PushButton{Text: "全部关闭", OnClicked: func() { mgr.CloseAll(); lblStatus.SetText("已关闭全部窗口，临时数据已清除") }},
-					PushButton{Text: "恢复默认网址", OnClicked: func() { teURLs.SetText(defaultURLs) }},
+					PushButton{Text: "全部关闭并清除", OnClicked: func() {
+						mgr.CloseAll()
+						lblStatus.SetTextColor(colDeep)
+						lblStatus.SetText("✓ 已关闭全部窗口，临时数据已清除")
+					}},
+					HSpacer{},
+					Label{AssignTo: &lblStatus, Text: "", TextColor: colDeep},
 				},
 			},
-			Label{AssignTo: &lblStatus, Text: ""},
-			Label{AssignTo: &lblCount, Text: "运行中（0）", Font: Font{Bold: true}},
-			ListBox{AssignTo: &lbRunning, MinSize: Size{Height: 160}},
+
+			// 运行中的窗口
 			Composite{
-				Layout: HBox{MarginsZero: true},
+				Background: SolidColorBrush{Color: colCard},
+				Layout:     VBox{Margins: Margins{Left: 14, Top: 12, Right: 14, Bottom: 12}, Spacing: 8},
 				Children: []Widget{
-					HSpacer{},
-					PushButton{Text: "前置所选", OnClicked: func() {
-						if inst := selected(); inst != nil {
-							mgr.Focus(inst)
-						}
-					}},
-					PushButton{Text: "关闭所选", OnClicked: func() {
-						if inst := selected(); inst != nil {
-							mgr.Close(inst)
-						}
-					}},
+					Label{AssignTo: &lblCount, Text: "运行中的窗口（0）", Font: Font{Bold: true}, TextColor: colDeep},
+					ListBox{AssignTo: &lbRunning, MinSize: Size{Height: 150}},
+					Composite{
+						Layout: HBox{MarginsZero: true},
+						Children: []Widget{
+							Label{Text: "选中一行后可以切到那个窗口，或单独关闭它", TextColor: colMuted},
+							HSpacer{},
+							PushButton{Text: "切到所选窗口", OnClicked: func() {
+								if inst := selected(); inst != nil {
+									mgr.Focus(inst)
+								}
+							}},
+							PushButton{Text: "关闭所选", OnClicked: func() {
+								if inst := selected(); inst != nil {
+									mgr.Close(inst)
+								}
+							}},
+						},
+					},
 				},
 			},
 		},
@@ -508,7 +613,9 @@ func main() {
 		return
 	}
 	if len(browsers) == 0 {
+		lblStatus.SetTextColor(walk.RGB(0xD9, 0x3A, 0x3F))
 		lblStatus.SetText("没有找到已安装的 Chrome / Edge / Brave / Firefox")
+		btnLaunch.SetEnabled(false)
 	}
 	// 窗口左上角和任务栏用 exe 里编进去的图标（app.rc 里的 1 号图标）
 	if ic, err := walk.NewIconFromResourceId(1); err == nil {

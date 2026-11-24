@@ -73,12 +73,26 @@ final class Manager: ObservableObject {
     @Published var instances: [Instance] = []
     @Published var message = ""
     private var counter = 0
-    let baseDir = FileManager.default.temporaryDirectory.appendingPathComponent("WuhenDuokai", isDirectory: true)
+    /// 所有运行共用的上层目录；每次运行只用自己的 run-<进程号> 子目录，同时开两份软件也互不影响
+    let rootDir = FileManager.default.temporaryDirectory.appendingPathComponent("WuhenDuokai", isDirectory: true)
+    let baseDir: URL
 
     init() {
-        // 清理上次异常退出遗留的临时目录
-        try? FileManager.default.removeItem(at: baseDir)
-        try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        baseDir = rootDir.appendingPathComponent("run-\(getpid())", isDirectory: true)
+        // 只清理已经退出的那些运行留下的目录（异常退出、强制退出）；还在运行的另一份软件的目录不碰。
+        // 旧版本直接放在上层目录里的 cr-*/ff-* 也一并清掉。
+        for name in (try? fm.contentsOfDirectory(atPath: rootDir.path)) ?? [] {
+            if name.hasPrefix("run-"), let pid = pid_t(name.dropFirst(4)), Manager.processAlive(pid) { continue }
+            try? fm.removeItem(at: rootDir.appendingPathComponent(name))
+        }
+        try? fm.createDirectory(at: baseDir, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+    }
+
+    /// 进程是否还在（kill 0 只检查、不发信号；EPERM 表示进程存在但属于别人）
+    static func processAlive(_ pid: pid_t) -> Bool {
+        pid > 0 && (kill(pid, 0) == 0 || errno == EPERM)
     }
 
     var axTrusted: Bool { AXIsProcessTrusted() }
@@ -88,7 +102,9 @@ final class Manager: ObservableObject {
         _ = AXIsProcessTrustedWithOptions(opt)
     }
 
-    func launch(browser: BrowserKind, count: Int, url: String, zoom: Int) {
+    func launch(browser: BrowserKind, count: Int, url: String, zoom rawZoom: Int) {
+        // 缩放比例来自本机保存的设置，限制在 25%–500%：0 或负数会让 log() 得出无效值，浏览器配置写坏
+        let zoom = min(max(rawZoom, 25), 500)
         guard browser.installed else { message = "未安装 \(browser.rawValue)"; return }
         let alive = instances.filter { $0.running }.count
         // 每行一个网址，每个窗口里各开成一个标签页
@@ -204,11 +220,111 @@ final class Manager: ObservableObject {
         let deadline = Date().addingTimeInterval(3)
         while instances.contains(where: { $0.process.isRunning }) && Date() < deadline { usleep(100_000) }
         instances.forEach { if $0.process.isRunning { kill($0.process.processIdentifier, SIGKILL) } }
-        try? FileManager.default.removeItem(at: baseDir)
+        try? FileManager.default.removeItem(at: baseDir)   // 只删自己这次运行的目录
+        rmdir(rootDir.path)                                 // 上层目录空了才会删掉；别的运行还在就保留
     }
 }
 
-// MARK: - 界面
+// MARK: - 界面（薄荷绿主题）
+
+extension NSColor {
+    convenience init(hex: UInt32) {
+        self.init(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                  blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+    }
+}
+
+/// 配色：浅色 / 深色模式各一套，跟随系统切换
+enum Theme {
+    private static func dyn(_ light: UInt32, _ dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { ap in
+            ap.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(hex: dark) : NSColor(hex: light)
+        })
+    }
+    static let accent  = dyn(0x1FB386, 0x3DD9A4)   // 薄荷绿：主按钮、选中状态
+    static let deep    = dyn(0x0B7A5A, 0x7BE8C2)   // 深薄荷：浅底上的文字和图标
+    static let soft    = dyn(0xE6F7F0, 0x15352B)   // 浅薄荷：选中底色、提示条
+    static let window  = dyn(0xF3FAF7, 0x111815)   // 窗口背景
+    static let card    = dyn(0xFFFFFF, 0x1A2420)   // 卡片
+    static let border  = dyn(0xD3EEE3, 0x274239)   // 卡片描边
+    static let danger  = dyn(0xE5484D, 0xFF6B6F)
+}
+
+/// 主按钮：薄荷绿实心，按下变暗，不可用时变灰
+struct MintButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(RoundedRectangle(cornerRadius: 12)
+                .fill(enabled ? Theme.accent : Color.gray.opacity(0.45)))
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .scaleEffect(configuration.isPressed ? 0.99 : 1)
+            .contentShape(Rectangle())
+    }
+}
+
+/// 次要按钮：白底描边；tint 决定文字颜色
+struct SoftButtonStyle: ButtonStyle {
+    var tint: Color = Theme.deep
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(enabled ? tint : Color.secondary)
+            .padding(.horizontal, 14).frame(minHeight: 34)
+            .background(RoundedRectangle(cornerRadius: 10).fill(configuration.isPressed ? Theme.soft : Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border))
+            .opacity(enabled ? 1 : 0.6)
+            .contentShape(Rectangle())
+    }
+}
+
+/// 白色卡片容器
+struct Card<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) { content }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.border))
+    }
+}
+
+/// 一行里的一个下拉项：上面小标题，下面下拉框
+struct Field<Content: View>: View {
+    let title: String
+    let icon: String
+    @ViewBuilder var content: Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            content.frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 设置卡片里的一行：左边标题，右边内容
+struct SettingRow<Content: View>: View {
+    let title: String
+    let icon: String
+    @ViewBuilder var content: Content
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 92, alignment: .leading)
+            content
+        }
+    }
+}
 
 struct ContentView: View {
     @EnvironmentObject var mgr: Manager
@@ -219,81 +335,207 @@ struct ContentView: View {
     @AppStorage("openURLs") private var url = ContentView.defaultURLs
     @State private var axOK = AXIsProcessTrusted()
     let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    private let zooms = [25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150]
+
+    private var installedBrowsers: [BrowserKind] { BrowserKind.allCases.filter { $0.installed } }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("一键多开无痕浏览器").font(.title2.bold())
-            Text("每个窗口独立配置 + 无痕模式，账号互不串号；关闭即清除全部数据。")
-                .font(.callout).foregroundStyle(.secondary)
-
-            Form {
-                Picker("浏览器", selection: $browser) {
-                    ForEach(BrowserKind.allCases) { b in
-                        Text(b.installed ? b.rawValue : "\(b.rawValue)（未安装）").tag(b).disabled(!b.installed)
-                    }
-                }
-                Stepper("数量：\(count)", value: $count, in: 1...36)
-                Picker("默认缩放", selection: $zoom) {
-                    ForEach([25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150], id: \.self) { Text("\($0)%").tag($0) }
-                }
-                LabeledContent("打开网址") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        TextEditor(text: $url)
-                            .font(.system(.body, design: .monospaced))
-                            .frame(height: 60)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                        HStack {
-                            Text("每行一个，每个窗口里各开一个标签页").font(.caption).foregroundStyle(.secondary)
-                            Spacer()
-                            Button("恢复默认") { url = ContentView.defaultURLs }.controlSize(.small)
-                        }
-                    }
-                }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header
+                settingsCard
+                actions
+                if !axOK { axHint }
+                runningSection
             }
-
-            HStack {
-                Button { mgr.launch(browser: browser, count: count, url: url, zoom: zoom) } label: {
-                    Label("一键打开 \(count) 个", systemImage: "square.grid.3x3.fill").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent).controlSize(.large).keyboardShortcut(.return)
-                Button { mgr.retile() } label: { Label("九宫格排列", systemImage: "rectangle.split.3x3") }
-                    .controlSize(.large)
-                Button(role: .destructive) { mgr.closeAll() } label: { Label("全部关闭", systemImage: "xmark.circle") }
-                    .controlSize(.large).disabled(mgr.instances.isEmpty)
-            }
-
-            if !axOK {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text("开启“辅助功能”权限后，九宫格排列更精准（Firefox 必需）。").font(.callout)
-                    Spacer()
-                    Button("去开启") { mgr.requestAX() }
-                }
-                .padding(8).background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-            }
-
-            if !mgr.message.isEmpty { Text(mgr.message).font(.callout).foregroundStyle(.secondary) }
-
-            Text("运行中（\(mgr.instances.count)）").font(.headline)
-            List(mgr.instances) { inst in
-                HStack {
-                    Image(systemName: "eye.slash").foregroundStyle(.purple)
-                    Text("#\(inst.number)  \(inst.browser.rawValue)")
-                    Spacer()
-                    Button("前置") { mgr.focus(inst) }
-                    Button("关闭") { mgr.close(inst) }
-                }
-            }
-            .frame(minHeight: 160)
+            .padding(20)
         }
-        .padding(20)
-        .frame(minWidth: 600, minHeight: 640)
+        .background(Theme.window)
+        .tint(Theme.accent)
+        .frame(minWidth: 640, minHeight: 620)
         .onReceive(timer) { _ in axOK = AXIsProcessTrusted() }
+    }
+
+    // 顶部：图标 + 名称 + 运行状态
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 46, height: 46)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("一键多开无痕浏览器").font(.system(size: 19, weight: .bold))
+                Text("每个窗口独立配置 + 无痕模式，账号互不串号，关闭即清除数据")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            HStack(spacing: 6) {
+                Circle().fill(mgr.instances.isEmpty ? Color.gray.opacity(0.5) : Theme.accent).frame(width: 8, height: 8)
+                Text(mgr.instances.isEmpty ? "未运行" : "运行中 \(mgr.instances.count)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(mgr.instances.isEmpty ? Color.secondary : Theme.deep)
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Capsule().fill(mgr.instances.isEmpty ? Theme.card : Theme.soft))
+            .overlay(Capsule().strokeBorder(Theme.border))
+        }
+    }
+
+    // 设置：浏览器 / 数量 / 缩放 / 网址
+    private var settingsCard: some View {
+        Card {
+            // 浏览器 / 窗口数量 / 默认缩放：一行三个下拉框
+            HStack(alignment: .top, spacing: 14) {
+                Field(title: "浏览器", icon: "globe") {
+                    Picker("", selection: $browser) {
+                        ForEach(installedBrowsers) { b in Text(b.rawValue).tag(b) }
+                    }
+                    .labelsHidden()
+                    .disabled(installedBrowsers.isEmpty)
+                    .help(installedBrowsers.isEmpty ? "这台电脑没有找到 Chrome / Edge / Brave / Firefox" : "只列出这台电脑上已安装的浏览器")
+                }
+                Field(title: "窗口数量", icon: "square.grid.3x3") {
+                    Picker("", selection: $count) {
+                        ForEach(1...36, id: \.self) { n in Text(n == 9 ? "9 个（九宫格）" : "\(n) 个").tag(n) }
+                    }
+                    .labelsHidden()
+                    .help("1–36 个；超过 9 个时，下一组会稍微错开叠放")
+                }
+                Field(title: "默认缩放", icon: "plus.magnifyingglass") {
+                    Picker("", selection: $zoom) {
+                        ForEach(zooms, id: \.self) { Text($0 == 100 ? "100%（原始大小）" : "\($0)%").tag($0) }
+                    }
+                    .labelsHidden()
+                    .help("网页内容的显示比例")
+                }
+            }
+            Divider().overlay(Theme.border)
+            SettingRow(title: "打开网址", icon: "link") {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextEditor(text: $url)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .frame(height: 64)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.window))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.border))
+                    HStack {
+                        Text("每行一个，每个窗口各开一个标签页；只接受 http/https 网址")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("恢复默认") { url = ContentView.defaultURLs }
+                            .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.deep)
+                            .disabled(url == ContentView.defaultURLs)
+                    }
+                }
+            }
+        }
+    }
+
+    // 操作：主按钮 + 次要按钮 + 结果提示
+    private var actions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { mgr.launch(browser: browser, count: count, url: url, zoom: zoom) } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.grid.3x3.fill")
+                    Text("一键打开 \(count) 个无痕窗口")
+                    Text("⌘↩").font(.system(size: 11, weight: .medium)).opacity(0.75)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.18)))
+                }
+            }
+            .buttonStyle(MintButtonStyle())
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(!browser.installed)
+
+            HStack(spacing: 10) {
+                Button { mgr.retile() } label: { Label("九宫格重新排列", systemImage: "rectangle.split.3x3") }
+                    .buttonStyle(SoftButtonStyle())
+                    .disabled(mgr.instances.isEmpty)
+                Button { mgr.closeAll() } label: { Label("全部关闭并清除", systemImage: "xmark.circle") }
+                    .buttonStyle(SoftButtonStyle(tint: Theme.danger))
+                    .disabled(mgr.instances.isEmpty)
+                Spacer()
+                if !mgr.message.isEmpty {
+                    let bad = ["失败", "未安装", "请在"].contains { mgr.message.contains($0) }
+                    Label(mgr.message, systemImage: bad ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 12)).foregroundStyle(bad ? Theme.danger : Theme.deep)
+                        .lineLimit(2).transition(.opacity)
+                }
+            }
+        }
+    }
+
+    // 辅助功能权限：温和提示，不用警告色
+    private var axHint: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "hand.raised.fill").foregroundStyle(Theme.deep)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("开启「辅助功能」权限，九宫格排列更精准").font(.system(size: 12.5, weight: .medium))
+                Text("Chrome / Edge / Brave 不开也能用；Firefox 需要这个权限才能排好")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("去开启") { mgr.requestAX() }.buttonStyle(SoftButtonStyle())
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.soft))
+    }
+
+    // 运行中的窗口列表
+    private var runningSection: some View {
+        Card {
+            HStack {
+                Text("运行中的窗口").font(.system(size: 14, weight: .semibold))
+                Text("\(mgr.instances.count)").font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                    .foregroundStyle(Theme.deep)
+                    .padding(.horizontal, 7).padding(.vertical, 1)
+                    .background(Capsule().fill(Theme.soft))
+                Spacer()
+            }
+            if mgr.instances.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "square.grid.3x3").font(.system(size: 30)).foregroundStyle(Theme.accent.opacity(0.6))
+                    Text("还没有打开的窗口").font(.system(size: 13, weight: .medium))
+                    Text("选好浏览器和数量，点上面的「一键打开」").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 130)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(mgr.instances) { inst in
+                        HStack(spacing: 12) {
+                            Text("\(inst.number)").font(.system(size: 12, weight: .bold)).monospacedDigit()
+                                .foregroundStyle(Theme.deep)
+                                .frame(width: 28, height: 28)
+                                .background(Circle().fill(Theme.soft))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(inst.browser.rawValue).font(.system(size: 13, weight: .medium))
+                                Label("无痕 · 独立配置", systemImage: "eye.slash")
+                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button { mgr.focus(inst) } label: { Image(systemName: "arrow.up.forward.app") }
+                                .buttonStyle(SoftButtonStyle()).help("切到这个窗口")
+                            Button { mgr.close(inst) } label: { Image(systemName: "xmark") }
+                                .buttonStyle(SoftButtonStyle(tint: Theme.danger)).help("关闭这个窗口并清除它的数据")
+                        }
+                        .padding(.vertical, 8)
+                        if inst.id != mgr.instances.last?.id { Divider().overlay(Theme.border) }
+                    }
+                }
+            }
+        }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var manager: Manager!
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // 测试用：WUHEN_APPEARANCE=dark / light 只让这一份软件用深色或浅色，不改系统设置
+        switch ProcessInfo.processInfo.environment["WUHEN_APPEARANCE"] {
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        default: break
+        }
+    }
     func applicationWillTerminate(_ notification: Notification) { manager.shutdown() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
