@@ -46,7 +46,8 @@ jobs:
       - name: 安装 NSIS、windres（把图标编进 exe）和打包要用的工具
         run: |
           apt-get update -q
-          apt-get install -y -q --no-install-recommends ca-certificates git python3 nsis binutils-mingw-w64-x86-64
+          # windres 编译图标资源前要用 gcc 做预处理，Debian 镜像默认没有 gcc，所以一起装上
+          apt-get install -y -q --no-install-recommends ca-certificates git python3 nsis binutils-mingw-w64-x86-64 gcc
       - name: 确认 NSIS 不低于 3.11
         run: |
           v="$(makensis -VERSION | sed 's/^v//')"
